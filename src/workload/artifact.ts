@@ -87,6 +87,14 @@ export class ArtifactService {
     return artifact;
   }
 
+  public assertInput(token: string, artifactId: string, orderId: string, leaseId: string): Artifact {
+    const artifact = this.get(token, artifactId);
+    if (artifact.orderId !== orderId || artifact.leaseId !== leaseId || artifact.kind !== "input" || artifact.status !== "available") {
+      throw new DomainError("ARTIFACT_RESOURCE_DENIED", "artifact 不属于当前订单或尚未可用");
+    }
+    return artifact;
+  }
+
   public deleteOrderArtifacts(orderId: string): number {
     let deleted = 0;
     for (const artifact of this.artifacts.values()) {

@@ -1,6 +1,7 @@
 import { id, type DomainStore } from "../domain/store.js";
 import { DomainError, forbidden, notFound } from "../domain/errors.js";
 import { CapabilityTokenService, type CapabilityScope } from "../agent/security.js";
+import type { ArtifactService } from "./artifact.js";
 
 export type JobStatus = "created" | "queued" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
 
@@ -39,6 +40,7 @@ export class WorkloadService {
     private readonly tokens: CapabilityTokenService,
     private readonly allowedImages: readonly string[],
     private readonly clock: () => number = () => Date.now(),
+    private readonly artifacts: ArtifactService | undefined = undefined,
   ) {}
 
   public submit(token: string, input: SubmitJobInput): Job {
@@ -52,6 +54,15 @@ export class WorkloadService {
     if (lease.orderId !== order.id || lease.tokenVersion !== claims.version) throw new DomainError("TOKEN_REVOKED", "租约 token 已撤销");
     if (!allowedStatuses.has(lease.status)) throw new DomainError("LEASE_NOT_READY", "租约当前不能提交任务");
     this.validateInput(input, listing.imageDigests);
+    for (const artifactId of input.inputArtifactIds) {
+      if (!this.artifacts) throw new DomainError("ARTIFACT_SERVICE_UNAVAILABLE", "artifact 服务尚未就绪");
+      try {
+        this.artifacts.assertInput(token, artifactId, input.orderId, input.leaseId);
+      } catch (error) {
+        if (error instanceof DomainError && error.code === "FORBIDDEN") throw error;
+        throw new DomainError("ARTIFACT_RESOURCE_DENIED", "任务只能读取同一订单的输入 artifact");
+      }
+    }
     const job: Job = {
       id: id("job"),
       orderId: order.id,
@@ -114,6 +125,17 @@ export class WorkloadService {
     job.status = "failed";
     job.endedAt = new Date(this.clock()).toISOString();
     return job;
+  }
+
+  public cancelForOrder(orderId: string): number {
+    let cancelled = 0;
+    for (const job of this.jobs.values()) {
+      if (job.orderId !== orderId || !["created", "queued", "running"].includes(job.status)) continue;
+      job.status = "cancelled";
+      job.endedAt = new Date(this.clock()).toISOString();
+      cancelled += 1;
+    }
+    return cancelled;
   }
 
   private authorizeJob(token: string, scope: CapabilityScope, job: Job): void {

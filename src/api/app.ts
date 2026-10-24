@@ -5,6 +5,9 @@ import { MarketplaceService } from "../domain/service.js";
 import { CapabilityTokenService } from "../agent/security.js";
 import { registerGatewayRoutes } from "./gateway.js";
 import { WorkloadService } from "../workload/job.js";
+import { ArtifactService } from "../workload/artifact.js";
+import { OrderCleanupService } from "../workload/cleanup.js";
+import { InMemorySandboxRuntime } from "../agent/sandbox.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -57,7 +60,10 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => schema.parse(value
 export const createApp = (service: MarketplaceService): FastifyInstance => {
   const app = Fastify({ logger: false });
   const capabilityTokens = new CapabilityTokenService(process.env.CAPABILITY_SECRET ?? "development-secret-that-is-longer-than-32-characters");
-  const workload = new WorkloadService(service.store, capabilityTokens, []);
+  const artifacts = new ArtifactService(service.store, capabilityTokens);
+  const workload = new WorkloadService(service.store, capabilityTokens, [], undefined, artifacts);
+  const cleanupRuntime = new InMemorySandboxRuntime([]);
+  const cleanup = new OrderCleanupService(service, workload, artifacts, cleanupRuntime);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
@@ -173,10 +179,11 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     const actor = requireActor(request, reply);
     if (!actor) return;
     const order = service.getOrderForBuyer(actor, routeId(request));
-    return reply.send(service.endOrder(order.id));
+    const result = cleanup.endOrder(order.id);
+    return reply.send({ ...result.order, cleanup: result.report });
   });
 
-  registerGatewayRoutes(app, workload);
+  registerGatewayRoutes(app, workload, artifacts);
 
   return app;
 };

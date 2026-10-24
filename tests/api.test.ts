@@ -103,5 +103,37 @@ describe("HTTP control plane", () => {
     const response = await app.inject({ method: "POST", url: "/v1/payments/pay_missing/authorize", headers: { "x-user-id": buyer.id }, payload: { providerReference: "payment" } });
     expect(response.statusCode).toBe(403);
   });
+
+  it("通过 Gateway 隔离 artifact，结束订单后旧 token 不能读取", async () => {
+    const app = createApp(new MarketplaceService(createStore()));
+    apps.push(app);
+    const user = async (role: "buyer" | "provider" | "operator") => (await app.inject({ method: "POST", url: "/v1/users", payload: { role } })).json<{ id: string }>();
+    const buyer = await user("buyer");
+    const provider = await user("provider");
+    const operator = await user("operator");
+    const node = (await app.inject({ method: "POST", url: "/v1/nodes", headers: { "x-user-id": provider.id }, payload: { region: "cn-east-1", agentVersion: "0.1.0", certificateFingerprint: "fingerprint-1234567890", gpus: [{ uuid: "GPU-artifact", model: "RTX 5090", vramMb: 32768, cudaVersion: "12.8", benchmarkScore: 210 }] } })).json<{ id: string; gpus: [{ id: string }] }>();
+    const listing = (await app.inject({ method: "POST", url: "/v1/listings", headers: { "x-user-id": provider.id }, payload: { nodeId: node.id, gpuId: node.gpus[0].id, pricePerHourMinor: 278, minimumMinutes: 30, imageDigests: [digest] } })).json<{ id: string }>();
+    await app.inject({ method: "POST", url: `/v1/listings/${listing.id}/publish`, headers: { "x-user-id": operator.id } });
+    const created = (await app.inject({ method: "POST", url: "/v1/orders", headers: { "x-user-id": buyer.id }, payload: { listingId: listing.id, durationMinutes: 30 } })).json<{ order: { id: string }; payment: { id: string } }>();
+    await app.inject({ method: "POST", url: `/v1/payments/${created.payment.id}/authorize`, headers: { "x-user-id": operator.id }, payload: { providerReference: "artifact-payment" } });
+    const lease = (await app.inject({ method: "POST", url: `/v1/orders/${created.order.id}/lease`, headers: { "x-user-id": operator.id } })).json<{ id: string }>();
+    await app.inject({ method: "POST", url: `/v1/leases/${lease.id}/ready`, headers: { "x-user-id": operator.id }, payload: { sandboxId: "artifact-sandbox" } });
+    const capability = (await app.inject({ method: "GET", url: `/v1/orders/${created.order.id}/capability`, headers: { "x-user-id": buyer.id } })).json<{ token: string }>();
+    const auth = { authorization: `Bearer ${capability.token}` };
+    const artifactResponse = await app.inject({ method: "POST", url: "/v1/gateway/artifacts", headers: auth, payload: { orderId: created.order.id, leaseId: lease.id, displayName: "input.zip", sizeBytes: 128, sha256: "a".repeat(64) } });
+    expect(artifactResponse.statusCode).toBe(201);
+    const artifact = artifactResponse.json<{ id: string; status: string }>();
+    expect(artifact.status).toBe("pending_upload");
+    expect((await app.inject({ method: "POST", url: `/v1/gateway/artifacts/${artifact.id}/complete`, headers: auth })).statusCode).toBe(200);
+    const read = await app.inject({ method: "GET", url: `/v1/gateway/artifacts/${artifact.id}`, headers: auth });
+    expect(read.statusCode).toBe(200);
+    expect(read.json<{ downloadUrl: string }>().downloadUrl).toContain(artifact.id);
+    const job = await app.inject({ method: "POST", url: "/v1/gateway/jobs", headers: auth, payload: { orderId: created.order.id, leaseId: lease.id, imageDigest: digest, command: ["python", "/workspace/main.py"], inputArtifactIds: [artifact.id], maxRuntimeSeconds: 60 } });
+    expect(job.statusCode).toBe(201);
+    const ended = await app.inject({ method: "POST", url: `/v1/orders/${created.order.id}/end`, headers: { "x-user-id": buyer.id } });
+    expect(ended.statusCode).toBe(200);
+    expect(ended.json<{ cleanup: { deletedArtifacts: number } }>().cleanup.deletedArtifacts).toBe(1);
+    expect((await app.inject({ method: "GET", url: `/v1/gateway/artifacts/${artifact.id}`, headers: auth })).statusCode).toBe(400);
+  });
 });
 

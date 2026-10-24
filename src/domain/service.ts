@@ -233,13 +233,49 @@ export class MarketplaceService {
   }
 
   public endOrder(orderId: string): Order {
+    this.beginOrderEnding(orderId);
+    this.revokeLeaseTokens(orderId);
+    return this.completeOrder(orderId);
+  }
+
+  /** Marks an order as ending while its GPU remains reserved for cleanup. */
+  public beginOrderEnding(orderId: string): Order {
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
     if (!["paid", "allocating", "active", "ending"].includes(order.status)) {
       throw new DomainError("INVALID_ORDER_STATE", "订单当前不能结束");
     }
+    if (order.status !== "ending") {
+      order.status = "ending";
+      this.audit("system", "order.ending", "order", orderId, {});
+    }
+    return order;
+  }
+
+  public revokeLeaseTokens(orderId: string): Lease | undefined {
+    const lease = [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
+    if (!lease) return undefined;
+    lease.tokenVersion += 1;
+    this.audit("system", "lease.tokens_revoke", "lease", lease.id, { tokenVersion: lease.tokenVersion });
+    return lease;
+  }
+
+  public markLeaseCleanupFailed(orderId: string, reason: string): Lease | undefined {
+    const lease = [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
+    if (!lease) return undefined;
+    lease.status = "cleanup_failed";
+    this.audit("system", "lease.cleanup_failed", "lease", lease.id, { reason });
+    return lease;
+  }
+
+  public completeOrder(orderId: string): Order {
+    const order = this.store.orders.get(orderId);
+    if (!order) throw notFound("订单");
+    if (order.status !== "ending") {
+      throw new DomainError("INVALID_ORDER_STATE", "订单尚未进入清理阶段");
+    }
     order.status = "completed";
-    order.endedAt = now();
+    order.endedAt = order.endedAt ?? now();
     const lease = [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
     if (lease) {
       lease.status = "ended";
@@ -247,7 +283,6 @@ export class MarketplaceService {
       const node = this.store.nodes.get(lease.nodeId);
       const gpu = node?.gpus.find((candidate) => candidate.id === lease.gpuId);
       if (gpu) gpu.available = true;
-      lease.tokenVersion += 1;
     }
     this.audit("system", "order.complete", "order", orderId, {});
     return order;
@@ -274,9 +309,13 @@ export class MarketplaceService {
   }
 
   public getLeaseForOrder(orderId: string): Lease {
-    const lease = [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
+    const lease = this.findLeaseForOrder(orderId);
     if (!lease) throw notFound("租约");
     return lease;
+  }
+
+  public findLeaseForOrder(orderId: string): Lease | undefined {
+    return [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
   }
 
   public getLease(leaseId: string): Lease {
