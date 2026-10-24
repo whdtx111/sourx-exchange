@@ -34,7 +34,7 @@ describe("订单清理编排", () => {
     const job = workload.submit(token, { orderId: created.order.id, leaseId: lease.id, imageDigest: digest, command: ["python"], inputArtifactIds: [artifact.id], maxRuntimeSeconds: 60 });
     expect(job.status).toBe("queued");
     const runtime = new InMemorySandboxRuntime([digest]);
-    const spec: SandboxSpec = { sandboxId: lease.sandboxId!, leaseId: lease.id, gpuUuid: "GPU-cleanup", imageDigest: digest, command: ["python"], workspaceQuotaMb: 100, environment: {}, networkMode: "isolated", privileged: false, hostMounts: [], containerUser: "1000", allowlistedEgress: [] };
+    const spec: SandboxSpec = { sandboxId: lease.sandboxId!, leaseId: lease.id, gpuUuid: "GPU-cleanup", imageDigest: digest, command: ["python"], workspaceQuotaMb: 100, environment: {}, networkMode: "isolated", hostPid: false, hostIpc: false, hostNetwork: false, readOnlyRootFilesystem: true, privileged: false, hostMounts: [], dropCapabilities: ["ALL"], pidsLimit: 256, memoryLimitMb: 1024, cpuLimitMilli: 1000, containerUser: "1000", allowlistedEgress: [] };
     runtime.create(spec);
     runtime.start(spec.sandboxId);
     const cleanup = new OrderCleanupService(marketplace, workload, artifacts, runtime);

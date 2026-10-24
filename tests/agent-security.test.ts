@@ -14,8 +14,16 @@ const spec = (): SandboxSpec => ({
   workspaceQuotaMb: 1024,
   environment: { JOB_ID: "job-1" },
   networkMode: "isolated",
+  hostPid: false,
+  hostIpc: false,
+  hostNetwork: false,
+  readOnlyRootFilesystem: true,
   privileged: false,
   hostMounts: [],
+  dropCapabilities: ["ALL"],
+  pidsLimit: 256,
+  memoryLimitMb: 4096,
+  cpuLimitMilli: 2000,
   containerUser: "1000:1000",
   allowlistedEgress: ["https://objects.example.com"],
 });
@@ -60,6 +68,8 @@ describe("Agent enrollment and security boundaries", () => {
     expect(() => executor.execute({ type: "prepare_sandbox", payload: { sandboxId: "sandbox-2", leaseId: "lease-2", spec: { ...spec(), sandboxId: "sandbox-2", leaseId: "lease-2", hostMounts: ["/Users/seller:/workspace"] as never[] } } })).toThrowError(/宿主机目录/);
     expect(() => executor.execute({ type: "prepare_sandbox", payload: { sandboxId: "sandbox-3", leaseId: "lease-3", spec: { ...spec(), sandboxId: "sandbox-3", leaseId: "lease-3", containerUser: "root" } } })).toThrowError(/root/);
     expect(() => executor.execute({ type: "prepare_sandbox", payload: { sandboxId: "sandbox-4", leaseId: "lease-4", spec: { ...spec(), sandboxId: "sandbox-4", leaseId: "lease-4", imageDigest: "sha256:" + "d".repeat(64) } } })).toThrowError(/白名单/);
+    expect(() => executor.execute({ type: "prepare_sandbox", payload: { sandboxId: "sandbox-5", leaseId: "lease-5", spec: { ...spec(), sandboxId: "sandbox-5", leaseId: "lease-5", hostNetwork: true } } })).toThrowError(/namespace/);
+    expect(() => executor.execute({ type: "prepare_sandbox", payload: { sandboxId: "sandbox-6", leaseId: "lease-6", spec: { ...spec(), sandboxId: "sandbox-6", leaseId: "lease-6", allowlistedEgress: ["http://169.254.169.254/latest/meta-data"] } } })).toThrowError(/metadata/);
   });
 
   it("sandbox 只能按固定生命周期停止和销毁", () => {
