@@ -31,6 +31,8 @@ export class SettlementService {
   public dispute(orderId: string): Settlement | null {
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
+    if (order.status === "disputed") return this.settlements.get(orderId) ?? null;
+    if (!["completed", "ending"].includes(order.status)) throw new DomainError("ORDER_NOT_DISPUTABLE", "订单当前不能发起争议");
     order.status = "disputed";
     const payment = [...this.store.payments.values()].find((candidate) => candidate.orderId === orderId);
     if (payment) payment.status = "disputed";
@@ -76,6 +78,7 @@ export class SettlementService {
     const settlement = this.settlements.get(orderId);
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
+    if (settlement?.status === "refunded") return settlement;
     if (!settlement) {
       const payment = [...this.store.payments.values()].find((candidate) => candidate.orderId === orderId);
       if (payment) payment.status = "partially_refunded";

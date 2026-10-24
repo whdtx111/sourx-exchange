@@ -8,6 +8,9 @@ import { WorkloadService } from "../workload/job.js";
 import { ArtifactService } from "../workload/artifact.js";
 import { OrderCleanupService } from "../workload/cleanup.js";
 import { InMemorySandboxRuntime } from "../agent/sandbox.js";
+import { MeteringService } from "../billing/metering.js";
+import { SettlementService } from "../billing/settlement.js";
+import { PaymentWebhookProcessor } from "../billing/payment-webhook.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -35,6 +38,18 @@ const orderSchema = z.object({
 });
 const paymentSchema = z.object({ providerReference: z.string().min(1).max(128) });
 const readySchema = z.object({ sandboxId: z.string().min(1).max(128) });
+const meterSchema = z.object({
+  observedAtEpoch: z.number().int().positive(),
+  heartbeat: z.boolean(),
+  sandboxState: z.enum(["ready", "running", "failed", "stopped"]),
+  gpuUuid: z.string().min(1).max(128),
+});
+const paymentWebhookSchema = z.object({
+  eventId: z.string().min(1).max(128),
+  paymentId: z.string().min(1),
+  status: z.enum(["authorized", "captured", "failed", "voided"]),
+  providerReference: z.string().min(1).max(128),
+});
 
 type ActorRequest = FastifyRequest<{ Body: unknown; Params: { id: string } }>;
 type IdRequest = FastifyRequest<{ Params: { id: string } }>;
@@ -64,10 +79,13 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const workload = new WorkloadService(service.store, capabilityTokens, [], undefined, artifacts);
   const cleanupRuntime = new InMemorySandboxRuntime([]);
   const cleanup = new OrderCleanupService(service, workload, artifacts, cleanupRuntime);
+  const metering = new MeteringService(service.store);
+  const settlement = new SettlementService(service.store, metering);
+  const paymentWebhooks = new PaymentWebhookProcessor(service, process.env.PAYMENT_WEBHOOK_SECRET ?? "development-payment-webhook-secret-longer-than-32");
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
-      const status = error.code === "NOT_FOUND" ? 404 : error.code === "FORBIDDEN" ? 403 : 400;
+      const status = error.code === "NOT_FOUND" ? 404 : error.code === "FORBIDDEN" ? 403 : error.code === "CLEANUP_FAILED" ? 409 : error.code === "INVALID_WEBHOOK_SIGNATURE" ? 401 : 400;
       void reply.code(status).send({ error: { code: error.code, message: error.message } });
       return;
     }
@@ -135,6 +153,13 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     return reply.send(service.authorizePayment(routeId(request), parse(paymentSchema, request.body).providerReference));
   });
 
+  app.post("/v1/payments/webhooks/:provider", async (request, reply) => {
+    const event = parse(paymentWebhookSchema, request.body);
+    const signature = request.headers["x-webhook-signature"];
+    if (typeof signature !== "string") throw new DomainError("INVALID_WEBHOOK_SIGNATURE", "缺少支付 webhook 签名");
+    return reply.send(paymentWebhooks.handle(event, signature));
+  });
+
   app.post("/v1/orders/:id/lease", async (request: IdRequest, reply) => {
     const actor = requireActor(request, reply);
     if (!actor) return;
@@ -147,6 +172,13 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     if (!actor) return;
     service.requireUser(actor, "operator");
     return reply.send(service.markLeaseReady(routeId(request), parse(readySchema, request.body).sandboxId));
+  });
+
+  app.post("/v1/agent/leases/:id/meter", async (request: ActorRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    const lease = service.getLeaseForProvider(actor, routeId(request));
+    return reply.send(metering.record({ leaseId: lease.id, ...parse(meterSchema, request.body) }));
   });
 
   app.get("/v1/orders/:id/capability", async (request: IdRequest, reply) => {
@@ -181,6 +213,35 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     const order = service.getOrderForBuyer(actor, routeId(request));
     const result = cleanup.endOrder(order.id);
     return reply.send({ ...result.order, cleanup: result.report });
+  });
+
+  app.get("/v1/orders/:id/metering", async (request: IdRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    const order = service.getOrderForBuyer(actor, routeId(request));
+    const buckets = metering.listForOrder(order.id);
+    return reply.send({ orderId: order.id, billableSeconds: metering.billableSeconds(order.id), buckets });
+  });
+
+  app.post("/v1/orders/:id/dispute", async (request: IdRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    const order = service.getOrderForBuyer(actor, routeId(request));
+    return reply.send(settlement.dispute(order.id));
+  });
+
+  app.post("/v1/orders/:id/settle", async (request: IdRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    service.requireUser(actor, "operator");
+    return reply.send(settlement.settle(routeId(request)));
+  });
+
+  app.post("/v1/orders/:id/refund", async (request: IdRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    service.requireUser(actor, "operator");
+    return reply.send(settlement.refund(routeId(request)));
   });
 
   registerGatewayRoutes(app, workload, artifacts);

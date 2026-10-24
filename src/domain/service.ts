@@ -10,6 +10,7 @@ import type {
   Payment,
   User,
   UserRole,
+  PaymentStatus,
 } from "./types.js";
 
 const now = (): string => new Date().toISOString();
@@ -183,6 +184,25 @@ export class MarketplaceService {
     return payment;
   }
 
+  public applyPaymentWebhook(paymentId: string, status: PaymentStatus, providerReference: string): Payment {
+    const payment = this.store.payments.get(paymentId);
+    if (!payment) throw notFound("支付意图");
+    const order = this.store.orders.get(payment.orderId);
+    if (!order) throw notFound("订单");
+    if (status === "authorized") return this.authorizePayment(paymentId, providerReference);
+    if (status === "captured") {
+      if (payment.status !== "authorized" && payment.status !== "captured") throw new DomainError("INVALID_PAYMENT_STATE", "支付必须先授权才能扣款");
+      payment.status = "captured";
+      payment.providerReference = providerReference;
+    } else if (status === "failed" || status === "voided") {
+      if (["settled", "partially_refunded"].includes(payment.status)) throw new DomainError("INVALID_PAYMENT_STATE", "已结算支付不能失败或撤销");
+      payment.status = status;
+      order.status = "failed";
+    }
+    this.audit("payment-provider", `payment.${status}`, "payment", payment.id, { orderId: order.id });
+    return payment;
+  }
+
   public allocateLease(orderId: string): Lease {
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
@@ -321,6 +341,14 @@ export class MarketplaceService {
   public getLease(leaseId: string): Lease {
     const lease = this.store.leases.get(leaseId);
     if (!lease) throw notFound("租约");
+    return lease;
+  }
+
+  public getLeaseForProvider(providerId: string, leaseId: string): Lease {
+    this.requireUser(providerId, "provider");
+    const lease = this.getLease(leaseId);
+    const node = this.store.nodes.get(lease.nodeId);
+    if (!node || node.providerId !== providerId) throw forbidden("不能为其他卖家的租约上报计量");
     return lease;
   }
 

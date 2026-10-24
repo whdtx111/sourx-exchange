@@ -15,13 +15,19 @@ export interface MeterBucket {
 export class MeteringService {
   private readonly buckets = new Map<string, MeterBucket>();
 
-  public constructor(private readonly store: DomainStore, private readonly intervalSeconds = 30) {
+  public constructor(private readonly store: DomainStore, private readonly intervalSeconds = 30, private readonly clock: () => number = () => Date.now()) {
     if (intervalSeconds <= 0 || !Number.isInteger(intervalSeconds)) throw new Error("计量周期必须为正整数");
   }
 
   public record(input: { leaseId: string; observedAtEpoch: number; heartbeat: boolean; sandboxState: "ready" | "running" | "failed" | "stopped"; gpuUuid: string }): MeterBucket {
     const lease = this.store.leases.get(input.leaseId);
     if (!lease) throw notFound("租约");
+    if (!Number.isInteger(input.observedAtEpoch) || input.observedAtEpoch <= 0 || input.observedAtEpoch > Math.floor(this.clock() / 1000) + 30) {
+      throw new DomainError("INVALID_METER_TIME", "计量时间戳不合法或来自未来");
+    }
+    const node = this.store.nodes.get(lease.nodeId);
+    const gpu = node?.gpus.find((candidate) => candidate.id === lease.gpuId);
+    if (!gpu || gpu.uuid !== input.gpuUuid) throw new DomainError("METER_GPU_MISMATCH", "计量 GPU 与租约不匹配");
     const bucketStartEpoch = Math.floor(input.observedAtEpoch / this.intervalSeconds) * this.intervalSeconds;
     const key = `${lease.id}:${bucketStartEpoch}`;
     const existing = this.buckets.get(key);
@@ -32,7 +38,7 @@ export class MeteringService {
       orderId: lease.orderId,
       bucketStartEpoch,
       intervalSeconds: this.intervalSeconds,
-      billable: input.heartbeat && (input.sandboxState === "ready" || input.sandboxState === "running") && lease.status !== "ended",
+      billable: input.heartbeat && (input.sandboxState === "ready" || input.sandboxState === "running") && ["ready", "running"].includes(lease.status),
       observedAt: new Date(input.observedAtEpoch * 1000).toISOString(),
       evidence: { heartbeat: input.heartbeat, sandboxState: input.sandboxState, gpuUuid: input.gpuUuid },
     };
