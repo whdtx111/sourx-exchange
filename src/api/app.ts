@@ -12,6 +12,8 @@ import { MeteringService } from "../billing/metering.js";
 import { SettlementService } from "../billing/settlement.js";
 import { PaymentWebhookProcessor } from "../billing/payment-webhook.js";
 import { AuthService } from "../auth/service.js";
+import { AgentRegistry } from "../agent/registry.js";
+import { EnrollmentCodeStore } from "../agent/enrollment.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -54,6 +56,20 @@ const paymentWebhookSchema = z.object({
 const authRegisterSchema = z.object({ identifier: z.string().min(3).max(254), password: z.string().min(12).max(256), role: z.enum(["buyer", "provider"]) });
 const authLoginSchema = z.object({ identifier: z.string().min(3).max(254), password: z.string().min(1).max(256) });
 const refreshSchema = z.object({ refreshToken: z.string().min(20) });
+const agentEnrollSchema = z.object({
+  code: z.string().min(6).max(128),
+  region: z.string().min(1).max(64),
+  agentVersion: z.string().min(1).max(32),
+  certificateFingerprint: z.string().min(16).max(128),
+  gpus: z.array(z.object({
+    uuid: z.string().min(1).max(128),
+    model: z.string().min(1).max(128),
+    vramMb: z.number().int().positive(),
+    cudaVersion: z.string().min(1).max(32),
+    benchmarkScore: z.number().nonnegative(),
+  })).min(1),
+});
+const agentHeartbeatSchema = z.object({ at: z.string().datetime().optional() });
 
 type ActorRequest = FastifyRequest<{ Body: unknown; Params: { id: string } }>;
 type IdRequest = FastifyRequest<{ Params: { id: string } }>;
@@ -101,6 +117,8 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const metering = new MeteringService(service.store);
   const settlement = new SettlementService(service.store, metering);
   const paymentWebhooks = new PaymentWebhookProcessor(service, process.env.PAYMENT_WEBHOOK_SECRET ?? "development-payment-webhook-secret-longer-than-32");
+  const enrollmentCodes = new EnrollmentCodeStore();
+  const agentRegistry = new AgentRegistry(service, enrollmentCodes);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
@@ -152,6 +170,24 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     const authorization = request.headers.authorization;
     if (authorization?.startsWith("Bearer ")) auth.logout(authorization.slice("Bearer ".length));
     return reply.code(204).send();
+  });
+
+  app.post("/v1/agent/enrollment-codes", async (request, reply) => {
+    const actorId = actor(request, reply);
+    if (!actorId) return;
+    return reply.code(201).send({ code: agentRegistry.issueEnrollmentCode(actorId) });
+  });
+
+  app.post("/v1/agent/enroll", async (request, reply) => {
+    const input = parse(agentEnrollSchema, request.body);
+    return reply.code(201).send(agentRegistry.enroll(input.code, input));
+  });
+
+  app.post("/v1/agent/nodes/:id/heartbeat", async (request: IdRequest, reply) => {
+    const agentToken = request.headers["x-agent-token"];
+    if (typeof agentToken !== "string" || agentToken.length === 0) throw new DomainError("INVALID_AGENT_CREDENTIAL", "缺少 Agent 凭证");
+    const input = parse(agentHeartbeatSchema, request.body ?? {});
+    return reply.send(agentRegistry.heartbeat(agentToken, routeId(request), input.at));
   });
 
   app.post("/v1/nodes", async (request, reply) => {
@@ -218,9 +254,18 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   });
 
   app.post("/v1/agent/leases/:id/meter", async (request: ActorRequest, reply) => {
-    const actorId = actor(request, reply);
-    if (!actorId) return;
-    const lease = service.getLeaseForProvider(actorId, routeId(request));
+    const agentToken = request.headers["x-agent-token"];
+    let lease;
+    if (typeof agentToken === "string" && agentToken.length > 0) {
+      lease = service.getLease(routeId(request));
+      const node = service.store.nodes.get(lease.nodeId);
+      if (!node) throw new DomainError("NOT_FOUND", "节点");
+      agentRegistry.assertNode(agentToken, node.id);
+    } else {
+      const actorId = actor(request, reply);
+      if (!actorId) return;
+      lease = service.getLeaseForProvider(actorId, routeId(request));
+    }
     return reply.send(metering.record({ leaseId: lease.id, ...parse(meterSchema, request.body) }));
   });
 
