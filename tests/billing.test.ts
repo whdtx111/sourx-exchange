@@ -80,6 +80,11 @@ describe("artifact、计量和结算", () => {
     service.endOrder(secondOrder.order.id);
     settlement.dispute(secondOrder.order.id);
     expect(() => settlement.settle(secondOrder.order.id)).toThrowError(/争议/);
+
+    const frozen = settlement.settle(order.id);
+    settlement.dispute(order.id);
+    expect(frozen.status).toBe("frozen");
+    expect(() => settlement.settle(order.id)).toThrowError(/争议/);
   });
 });
 

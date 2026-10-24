@@ -43,7 +43,10 @@ export class SettlementService {
 
   public settle(orderId: string): Settlement {
     const existing = this.settlements.get(orderId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status === "frozen") throw new DomainError("ORDER_DISPUTED", "争议订单不能自动结算");
+      return existing;
+    }
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
     if (order.status === "disputed") throw new DomainError("ORDER_DISPUTED", "争议订单不能自动结算");
