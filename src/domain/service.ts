@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { DomainError, forbidden, notFound } from "./errors.js";
-import { id, type DomainStore } from "./store.js";
+import { id, type DomainStore, type ResourceReservation } from "./store.js";
 import type {
   ComputeNode,
   GpuResource,
@@ -128,6 +128,7 @@ export class MarketplaceService {
 
   public createOrder(buyerId: string, listingId: string, durationMinutes: number): { order: Order; payment: Payment } {
     this.requireUser(buyerId, "buyer");
+    this.expireReservations();
     const listing = this.store.listings.get(listingId);
     if (!listing) throw notFound("算力商品");
     if (listing.status !== "published") throw new DomainError("LISTING_UNAVAILABLE", "算力商品当前不可购买");
@@ -138,6 +139,9 @@ export class MarketplaceService {
     const gpu = node?.gpus.find((candidate) => candidate.id === listing.gpuId);
     if (!node || !gpu || node.status !== "online" || !gpu.available) {
       throw new DomainError("RESOURCE_UNAVAILABLE", "GPU 当前不可用");
+    }
+    if ([...this.store.reservations.values()].some((reservation) => reservation.gpuId === gpu.id)) {
+      throw new DomainError("RESOURCE_UNAVAILABLE", "GPU 已被其他订单临时预留");
     }
     const computeAmountMinor = Math.ceil((listing.pricePerHourMinor * durationMinutes) / 60);
     const platformFeeMinor = percentageFee(computeAmountMinor, 500);
@@ -165,6 +169,9 @@ export class MarketplaceService {
     };
     this.store.orders.set(order.id, order);
     this.store.payments.set(payment.id, payment);
+    const reservation: ResourceReservation = { id: `res_${order.id}`, orderId: order.id, gpuId: gpu.id, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() };
+    this.store.reservations.set(reservation.id, reservation);
+    this.audit(buyerId, "resource.reserve", "reservation", reservation.id, { orderId: order.id, gpuId: gpu.id, expiresAt: reservation.expiresAt });
     this.audit(buyerId, "order.create", "order", order.id, { listingId, totalAmountMinor: order.totalAmountMinor });
     return { order, payment };
   }
@@ -198,12 +205,14 @@ export class MarketplaceService {
       if (["settled", "partially_refunded"].includes(payment.status)) throw new DomainError("INVALID_PAYMENT_STATE", "已结算支付不能失败或撤销");
       payment.status = status;
       order.status = "failed";
+      this.releaseReservation(order.id);
     }
     this.audit("payment-provider", `payment.${status}`, "payment", payment.id, { orderId: order.id });
     return payment;
   }
 
   public allocateLease(orderId: string): Lease {
+    this.expireReservations();
     const order = this.store.orders.get(orderId);
     if (!order) throw notFound("订单");
     if (order.status !== "paid") throw new DomainError("ORDER_NOT_PAID", "订单尚未完成支付授权");
@@ -214,12 +223,15 @@ export class MarketplaceService {
     if (!node || !gpu || node.status !== "online" || !gpu.available) {
       throw new DomainError("RESOURCE_UNAVAILABLE", "GPU 当前不可用");
     }
+    const reservation = [...this.store.reservations.values()].find((candidate) => candidate.orderId === orderId && candidate.gpuId === gpu.id);
+    if (!reservation) throw new DomainError("RESERVATION_EXPIRED", "订单资源预留已过期，请重新下单");
     if ([...this.store.leases.values()].some((lease) =>
       lease.gpuId === gpu.id && ["requested", "reserving", "starting", "ready", "running", "stopping"].includes(lease.status),
     )) {
       throw new DomainError("RESOURCE_RACE", "GPU 已被其他租约占用");
     }
     gpu.available = false;
+    this.store.reservations.delete(reservation.id);
     order.status = "allocating";
     const lease: Lease = {
       id: id("lease"),
@@ -304,6 +316,7 @@ export class MarketplaceService {
       const gpu = node?.gpus.find((candidate) => candidate.id === lease.gpuId);
       if (gpu) gpu.available = true;
     }
+    this.releaseReservation(orderId);
     this.audit("system", "order.complete", "order", orderId, {});
     return order;
   }
@@ -336,6 +349,27 @@ export class MarketplaceService {
 
   public findLeaseForOrder(orderId: string): Lease | undefined {
     return [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
+  }
+
+  public expireReservations(at = Date.now()): number {
+    let released = 0;
+    for (const reservation of this.store.reservations.values()) {
+      if (Date.parse(reservation.expiresAt) > at) continue;
+      this.store.reservations.delete(reservation.id);
+      const order = this.store.orders.get(reservation.orderId);
+      if (order?.status === "payment_pending") {
+        order.status = "failed";
+        this.audit("system", "resource.reserve_expire", "reservation", reservation.id, { orderId: reservation.orderId });
+      }
+      released += 1;
+    }
+    return released;
+  }
+
+  private releaseReservation(orderId: string): void {
+    for (const reservation of this.store.reservations.values()) {
+      if (reservation.orderId === orderId) this.store.reservations.delete(reservation.id);
+    }
   }
 
   public getLease(leaseId: string): Lease {

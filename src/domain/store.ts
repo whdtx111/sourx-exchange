@@ -16,7 +16,15 @@ export interface DomainStore {
   orders: Map<string, Order>;
   payments: Map<string, Payment>;
   leases: Map<string, Lease>;
+  reservations: Map<string, ResourceReservation>;
   auditEvents: AuditEvent[];
+}
+
+export interface ResourceReservation {
+  id: string;
+  orderId: string;
+  gpuId: string;
+  expiresAt: string;
 }
 
 export const createStore = (): DomainStore => ({
@@ -26,6 +34,7 @@ export const createStore = (): DomainStore => ({
   orders: new Map(),
   payments: new Map(),
   leases: new Map(),
+  reservations: new Map(),
   auditEvents: [],
 });
 

@@ -82,5 +82,15 @@ describe("MarketplaceService", () => {
       gpus: [],
     })).toThrowError(/至少需要一张 GPU/);
   });
+
+  it("下单立即预留 GPU，预留过期后释放并标记未支付订单失败", () => {
+    const { service, buyer, listing } = fixture();
+    const first = service.createOrder(buyer.id, listing.id, 30);
+    const secondBuyer = service.createUser("buyer");
+    expect(() => service.createOrder(secondBuyer.id, listing.id, 30)).toThrowError(/临时预留/);
+    expect(service.expireReservations(Date.now() + 16 * 60_000)).toBe(1);
+    expect(service.store.orders.get(first.order.id)?.status).toBe("failed");
+    expect(service.createOrder(secondBuyer.id, listing.id, 30).order.buyerId).toBe(secondBuyer.id);
+  });
 });
 
