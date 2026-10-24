@@ -57,6 +57,29 @@ describe("HTTP control plane", () => {
     expect(endResponse.json<{ status: string }>().status).toBe("completed");
   });
 
+  it("签发租约 capability 后才能提交任务，订单结束后 token 失效", async () => {
+    const app = createApp(new MarketplaceService(createStore()));
+    apps.push(app);
+    const createUser = async (role: "buyer" | "provider" | "operator") => (await app.inject({ method: "POST", url: "/v1/users", payload: { role } })).json<{ id: string }>();
+    const buyer = await createUser("buyer");
+    const provider = await createUser("provider");
+    const operator = await createUser("operator");
+    const node = (await app.inject({ method: "POST", url: "/v1/nodes", headers: { "x-user-id": provider.id }, payload: { region: "cn-east-1", agentVersion: "0.1.0", certificateFingerprint: "fingerprint-1234567890", gpus: [{ uuid: "GPU-1", model: "RTX 5090", vramMb: 32768, cudaVersion: "12.8", benchmarkScore: 210 }] } })).json<{ id: string; gpus: [{ id: string }] }>();
+    const listing = (await app.inject({ method: "POST", url: "/v1/listings", headers: { "x-user-id": provider.id }, payload: { nodeId: node.id, gpuId: node.gpus[0].id, pricePerHourMinor: 278, minimumMinutes: 30, imageDigests: [digest] } })).json<{ id: string }>();
+    await app.inject({ method: "POST", url: `/v1/listings/${listing.id}/publish`, headers: { "x-user-id": operator.id } });
+    const orderResult = (await app.inject({ method: "POST", url: "/v1/orders", headers: { "x-user-id": buyer.id }, payload: { listingId: listing.id, durationMinutes: 30 } })).json<{ order: { id: string }; payment: { id: string } }>();
+    await app.inject({ method: "POST", url: `/v1/payments/${orderResult.payment.id}/authorize`, headers: { "x-user-id": operator.id }, payload: { providerReference: "payment-2" } });
+    const lease = (await app.inject({ method: "POST", url: `/v1/orders/${orderResult.order.id}/lease`, headers: { "x-user-id": operator.id } })).json<{ id: string }>();
+    await app.inject({ method: "POST", url: `/v1/leases/${lease.id}/ready`, headers: { "x-user-id": operator.id }, payload: { sandboxId: "sandbox-2" } });
+    const capability = (await app.inject({ method: "GET", url: `/v1/orders/${orderResult.order.id}/capability`, headers: { "x-user-id": buyer.id } })).json<{ token: string }>();
+    const job = await app.inject({ method: "POST", url: "/v1/gateway/jobs", headers: { authorization: `Bearer ${capability.token}` }, payload: { orderId: orderResult.order.id, leaseId: lease.id, imageDigest: digest, command: ["python", "/workspace/main.py"], inputArtifactIds: [], maxRuntimeSeconds: 60 } });
+    expect(job.statusCode).toBe(201);
+    const jobResult = job.json<{ id: string }>();
+    expect((await app.inject({ method: "GET", url: `/v1/gateway/jobs/${jobResult.id}`, headers: { authorization: `Bearer ${capability.token}` } })).statusCode).toBe(200);
+    await app.inject({ method: "POST", url: `/v1/orders/${orderResult.order.id}/end`, headers: { "x-user-id": buyer.id } });
+    expect((await app.inject({ method: "POST", url: "/v1/gateway/jobs", headers: { authorization: `Bearer ${capability.token}` }, payload: { orderId: orderResult.order.id, leaseId: lease.id, imageDigest: digest, command: ["python"], inputArtifactIds: [], maxRuntimeSeconds: 60 } })).statusCode).toBe(400);
+  });
+
   it("拒绝未认证和跨买家订单读取", async () => {
     const service = new MarketplaceService(createStore());
     const app = createApp(service);

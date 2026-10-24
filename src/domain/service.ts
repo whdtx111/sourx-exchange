@@ -24,7 +24,7 @@ const percentageFee = (amountMinor: number, basisPoints: number): number =>
   Math.floor((amountMinor * basisPoints) / 10_000);
 
 export class MarketplaceService {
-  public constructor(private readonly store: DomainStore) {}
+  public constructor(public readonly store: DomainStore) {}
 
   public createUser(role: UserRole): User {
     const user: User = { id: id("usr"), role, status: "active", createdAt: now() };
@@ -271,6 +271,18 @@ export class MarketplaceService {
     if (!node) throw notFound("节点");
     if (node.providerId !== providerId) throw forbidden("不能查看其他卖家的节点");
     return node;
+  }
+
+  public getLeaseForOrder(orderId: string): Lease {
+    const lease = [...this.store.leases.values()].find((candidate) => candidate.orderId === orderId);
+    if (!lease) throw notFound("租约");
+    return lease;
+  }
+
+  public getLease(leaseId: string): Lease {
+    const lease = this.store.leases.get(leaseId);
+    if (!lease) throw notFound("租约");
+    return lease;
   }
 
   public auditEvents(): readonly unknown[] {

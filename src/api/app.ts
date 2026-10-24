@@ -2,6 +2,9 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { DomainError } from "../domain/errors.js";
 import { MarketplaceService } from "../domain/service.js";
+import { CapabilityTokenService } from "../agent/security.js";
+import { registerGatewayRoutes } from "./gateway.js";
+import { WorkloadService } from "../workload/job.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -53,6 +56,8 @@ const parse = <T>(schema: z.ZodType<T>, value: unknown): T => schema.parse(value
 
 export const createApp = (service: MarketplaceService): FastifyInstance => {
   const app = Fastify({ logger: false });
+  const capabilityTokens = new CapabilityTokenService(process.env.CAPABILITY_SECRET ?? "development-secret-that-is-longer-than-32-characters");
+  const workload = new WorkloadService(service.store, capabilityTokens, []);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
@@ -138,6 +143,26 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     return reply.send(service.markLeaseReady(routeId(request), parse(readySchema, request.body).sandboxId));
   });
 
+  app.get("/v1/orders/:id/capability", async (request: IdRequest, reply) => {
+    const actor = requireActor(request, reply);
+    if (!actor) return;
+    const order = service.getOrderForBuyer(actor, routeId(request));
+    const lease = service.getLeaseForOrder(order.id);
+    if (!["ready", "running"].includes(lease.status)) {
+      throw new DomainError("LEASE_NOT_READY", "租约当前不能签发 capability token");
+    }
+    const expiresAt = Math.floor(Date.now() / 1000) + order.durationMinutes * 60;
+    const token = capabilityTokens.issue({
+      subject: actor,
+      orderId: order.id,
+      leaseId: lease.id,
+      scopes: ["job:create", "job:read", "job:cancel", "artifact:read", "artifact:write"],
+      version: lease.tokenVersion,
+      expiresAt,
+    });
+    return reply.send({ token, expiresAt, orderId: order.id, leaseId: lease.id });
+  });
+
   app.get("/v1/orders/:id", async (request: ActorRequest, reply) => {
     const actor = requireActor(request, reply);
     if (!actor) return;
@@ -150,6 +175,8 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     const order = service.getOrderForBuyer(actor, routeId(request));
     return reply.send(service.endOrder(order.id));
   });
+
+  registerGatewayRoutes(app, workload);
 
   return app;
 };
