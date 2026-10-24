@@ -14,6 +14,8 @@ import { PaymentWebhookProcessor } from "../billing/payment-webhook.js";
 import { AuthService } from "../auth/service.js";
 import { AgentRegistry } from "../agent/registry.js";
 import { EnrollmentCodeStore } from "../agent/enrollment.js";
+import { AgentCommandQueue } from "../agent/commands.js";
+import { AgentCommandSigner } from "../agent/security.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -70,9 +72,11 @@ const agentEnrollSchema = z.object({
   })).min(1),
 });
 const agentHeartbeatSchema = z.object({ at: z.string().datetime().optional() });
+const commandAckSchema = z.object({ status: z.enum(["succeeded", "failed"]), message: z.string().max(512).nullable().default(null) });
 
 type ActorRequest = FastifyRequest<{ Body: unknown; Params: { id: string } }>;
 type IdRequest = FastifyRequest<{ Params: { id: string } }>;
+type CommandAckRequest = FastifyRequest<{ Body: unknown; Params: { id: string; commandId: string } }>;
 
 const actorId = (request: FastifyRequest, auth: AuthService): string | null => {
   const authorization = request.headers.authorization;
@@ -119,6 +123,7 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const paymentWebhooks = new PaymentWebhookProcessor(service, process.env.PAYMENT_WEBHOOK_SECRET ?? "development-payment-webhook-secret-longer-than-32");
   const enrollmentCodes = new EnrollmentCodeStore();
   const agentRegistry = new AgentRegistry(service, enrollmentCodes);
+  const agentCommands = new AgentCommandQueue(new AgentCommandSigner(process.env.AGENT_COMMAND_SECRET ?? "development-agent-command-secret-longer-than-32"));
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
@@ -188,6 +193,21 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     if (typeof agentToken !== "string" || agentToken.length === 0) throw new DomainError("INVALID_AGENT_CREDENTIAL", "缺少 Agent 凭证");
     const input = parse(agentHeartbeatSchema, request.body ?? {});
     return reply.send(agentRegistry.heartbeat(agentToken, routeId(request), input.at));
+  });
+
+  app.get("/v1/agent/nodes/:id/commands", async (request: IdRequest, reply) => {
+    const agentToken = request.headers["x-agent-token"];
+    if (typeof agentToken !== "string" || agentToken.length === 0) throw new DomainError("INVALID_AGENT_CREDENTIAL", "缺少 Agent 凭证");
+    agentRegistry.assertNode(agentToken, routeId(request));
+    return reply.send({ commands: agentCommands.pull(routeId(request)) });
+  });
+
+  app.post("/v1/agent/nodes/:id/commands/:commandId/ack", async (request: CommandAckRequest, reply) => {
+    const agentToken = request.headers["x-agent-token"];
+    if (typeof agentToken !== "string" || agentToken.length === 0) throw new DomainError("INVALID_AGENT_CREDENTIAL", "缺少 Agent 凭证");
+    agentRegistry.assertNode(agentToken, request.params.id);
+    const input = parse(commandAckSchema, request.body);
+    return reply.send(agentCommands.acknowledge(request.params.id, request.params.commandId, input.status, input.message));
   });
 
   app.post("/v1/nodes", async (request, reply) => {

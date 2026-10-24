@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EnrollmentCodeStore } from "../src/agent/enrollment.js";
 import { AgentCommandSigner, CapabilityTokenService } from "../src/agent/security.js";
 import { AgentCommandExecutor, InMemorySandboxRuntime, type SandboxSpec } from "../src/agent/sandbox.js";
+import { AgentCommandQueue } from "../src/agent/commands.js";
 
 const secret = "test-secret-that-is-longer-than-32-characters";
 const imageDigest = "sha256:" + "c".repeat(64);
@@ -80,6 +81,15 @@ describe("Agent enrollment and security boundaries", () => {
     expect(() => executor.execute({ type: "destroy_sandbox", payload: { sandboxId: "sandbox-1", leaseId: "lease-1" } })).toThrowError(/运行中的/);
     expect(executor.execute({ type: "stop_sandbox", payload: { sandboxId: "sandbox-1", leaseId: "lease-1" } }).status).toBe("stopping");
     expect(executor.execute({ type: "destroy_sandbox", payload: { sandboxId: "sandbox-1", leaseId: "lease-1" } }).status).toBe("destroyed");
+  });
+
+  it("Agent 命令队列只下发签名命令并要求同一节点确认", () => {
+    const queue = new AgentCommandQueue(new AgentCommandSigner(secret), () => 1_000_000);
+    const command = queue.enqueue("node-1", "stop_sandbox", { sandboxId: "sandbox-1", leaseId: "lease-1" });
+    expect(queue.pull("node-1")).toHaveLength(1);
+    expect(() => queue.acknowledge("node-2", command.id, "succeeded")).toThrowError(/不存在/);
+    expect(queue.acknowledge("node-1", command.id, "succeeded").status).toBe("succeeded");
+    expect(queue.getAck(command.id)?.nodeId).toBe("node-1");
   });
 });
 
