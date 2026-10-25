@@ -1,0 +1,25 @@
+services:
+  sourx-exchange:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sourx-exchange-demo
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DEMO_MODE: "true"
+      ALLOW_DEV_AUTH_BYPASS: "true"
+      AUTH_SECRET: "local-demo-auth-secret-change-me-32-chars"
+      CAPABILITY_SECRET: "local-demo-capability-secret-change-me-32"
+      AGENT_COMMAND_SECRET: "local-demo-agent-command-secret-change-me"
+      PAYMENT_WEBHOOK_SECRET: "local-demo-payment-webhook-secret-change"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => { if (!r.ok) process.exit(1) })"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped

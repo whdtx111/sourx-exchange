@@ -16,6 +16,10 @@ import { AgentRegistry } from "../agent/registry.js";
 import { EnrollmentCodeStore } from "../agent/enrollment.js";
 import { AgentCommandQueue } from "../agent/commands.js";
 import { AgentCommandSigner } from "../agent/security.js";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { demoImageDigest, initializeDemo, type DemoState } from "../demo.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -116,7 +120,8 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const capabilityTokens = new CapabilityTokenService(process.env.CAPABILITY_SECRET ?? "development-secret-that-is-longer-than-32-characters");
   const artifacts = new ArtifactService(service.store, capabilityTokens);
   const workload = new WorkloadService(service.store, capabilityTokens, [], undefined, artifacts);
-  const cleanupRuntime = new InMemorySandboxRuntime([]);
+  const demoMode = process.env.DEMO_MODE === "true";
+  const cleanupRuntime = new InMemorySandboxRuntime(demoMode ? [demoImageDigest] : []);
   const cleanup = new OrderCleanupService(service, workload, artifacts, cleanupRuntime);
   const metering = new MeteringService(service.store);
   const settlement = new SettlementService(service.store, metering);
@@ -124,6 +129,37 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const enrollmentCodes = new EnrollmentCodeStore();
   const agentRegistry = new AgentRegistry(service, enrollmentCodes);
   const agentCommands = new AgentCommandQueue(new AgentCommandSigner(process.env.AGENT_COMMAND_SECRET ?? "development-agent-command-secret-longer-than-32"));
+  const demo = demoMode ? initializeDemo(service, metering) : null;
+  if (demo) {
+    cleanupRuntime.create({
+      sandboxId: demo.lease.sandboxId!,
+      leaseId: demo.lease.id,
+      gpuUuid: demo.node.gpus[0]!.uuid,
+      imageDigest: demoImageDigest,
+      command: ["python"],
+      workspaceQuotaMb: 1024,
+      environment: {},
+      networkMode: "isolated",
+      hostPid: false,
+      hostIpc: false,
+      hostNetwork: false,
+      readOnlyRootFilesystem: true,
+      privileged: false,
+      hostMounts: [],
+      dropCapabilities: ["ALL"],
+      pidsLimit: 128,
+      memoryLimitMb: 4096,
+      cpuLimitMilli: 2000,
+      containerUser: "1000:1000",
+      allowlistedEgress: [],
+    });
+  }
+  const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
+  const webRoot = join(projectRoot, "web");
+  const webDist = join(projectRoot, "web-dist");
+  const sendWebFile = async (file: string, reply: FastifyReply, contentType: string) => {
+    return reply.type(contentType).send(await readFile(file));
+  };
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof DomainError) {
@@ -141,10 +177,43 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
       });
       return;
     }
+    console.error("[sourx] unhandled request error", error);
     void reply.code(500).send({ error: { code: "INTERNAL_ERROR", message: "服务内部错误" } });
   });
 
   app.get("/health", async () => ({ status: "ok", service: "sourx-exchange" }));
+
+  app.get("/", async (_request, reply) => {
+    try {
+      return await sendWebFile(join(webDist, "index.html"), reply, "text/html; charset=utf-8");
+    } catch {
+      return reply.type("text/html; charset=utf-8").send(await readFile(join(webRoot, "index.html"), "utf8"));
+    }
+  });
+  app.get("/assets/*", async (request, reply) => {
+    const asset = (request.params as { "*": string })["*"];
+    if (!asset || asset.includes("..") || asset.includes("\\")) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "静态资源不存在" } });
+    const contentType = asset.endsWith(".css") ? "text/css; charset=utf-8" : asset.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream";
+    return sendWebFile(join(webDist, "assets", asset), reply, contentType);
+  });
+  app.get("/app.js", async (_request, reply) => reply.type("text/javascript; charset=utf-8").send(await readFile(join(webRoot, "app.js"), "utf8")));
+  app.get("/styles.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(await readFile(join(webRoot, "styles.css"), "utf8")));
+  app.get("/v1/demo/overview", async (request, reply) => {
+    if (!demo) return reply.code(404).send({ error: { code: "DEMO_DISABLED", message: "演示模式未启用" } });
+    const overview = demo as DemoState;
+    const meteringForOrder = metering.listForOrder(overview.order.id);
+    return reply.send({
+      users: overview.users,
+      node: overview.node,
+      listing: overview.listing,
+      order: overview.order,
+      payment: overview.payment,
+      lease: overview.lease,
+      metering: { billableSeconds: metering.billableSeconds(overview.order.id), buckets: meteringForOrder },
+      security: { capabilityScopes: ["job:create", "job:read", "job:cancel", "artifact:read", "artifact:write"], hostMounts: false, hostNetwork: false, rootFilesystemReadOnly: true, orderScoped: true },
+      requestedBy: request.headers["x-user-id"] ?? null,
+    });
+  });
 
   // 仅用于开发/测试环境的用户 bootstrap；正式环境应由身份服务替代。
   app.post("/v1/users", async (request, reply) => {
