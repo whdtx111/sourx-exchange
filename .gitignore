@@ -8,3 +8,8 @@ coverage/
 .DS_Store
 *.log
 
+
+data/
+playwright-report/
+test-results/
+artifacts/*.png

@@ -1,0 +1,4 @@
+import {useEffect,useState,type ReactNode,type MouseEvent} from "react";
+export function navigate(path:string,replace=false) { if(replace) history.replaceState({},"",path);else history.pushState({},"",path);window.dispatchEvent(new PopStateEvent("popstate"));window.scrollTo(0,0); }
+export function usePath(){const[path,setPath]=useState(location.pathname);useEffect(()=>{const update=()=>setPath(location.pathname);window.addEventListener("popstate",update);return()=>window.removeEventListener("popstate",update);},[]);return path;}
+export function Link({to,children,className="",onClick,...rest}:{to:string;children:ReactNode;className?:string;onClick?:()=>void;[key:string]:unknown}){return <a href={to} className={className} {...rest} onClick={(e:MouseEvent<HTMLAnchorElement>)=>{if(e.button===0&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey&&!e.altKey){e.preventDefault();onClick?.();navigate(to);}}}>{children}</a>;}

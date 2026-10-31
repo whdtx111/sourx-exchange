@@ -1,0 +1,12 @@
+export type Role = "buyer" | "provider" | "operator";
+export type User = {id:string;role:Role;status:string;createdAt:string;identifier:string};
+export type Session = {accessToken:string;refreshToken:string;accessExpiresAt:number;user:{id:string;role:Role}};
+export type Config = {localMode:boolean;paymentMode:string;runtimeMode:string;sampleAccounts:Array<{identifier:string;role:Role}>};
+export type CatalogItem = {id:string;status:string;pricePerHourMinor:number;minimumMinutes:number;imageDigests:string[];version:number;region:string;providerLabel:string;gpu:{model:string;vramMb:number;cudaVersion:string;benchmarkScore:number};available:boolean;nodeId?:string;gpuId?:string};
+export type Settlement = {id:string;orderId:string;status:string;billableSeconds:number;computeAmountMinor:number;platformFeeMinor:number;providerPayoutMinor:number;chargedAmountMinor:number;releasedAmountMinor:number;createdAt:string};
+export type Order = {id:string;listingId:string;durationMinutes:number;pricePerHourMinor:number;computeAmountMinor:number;platformFeeMinor:number;totalAmountMinor:number;status:string;createdAt:string;paidAt:string|null;endedAt:string|null;listing:CatalogItem;payment:{id:string;status:string;amountMinor:number}|null;lease:{id:string;status:string;startedAt:string|null;endedAt:string|null}|null;billableSeconds:number;settlement:Settlement|null};
+export type Node = {id:string;region:string;status:string;agentVersion:string;lastHeartbeatAt:string|null;gpus:Array<{id:string;uuid:string;model:string;vramMb:number;cudaVersion:string;available:boolean}>};
+export type Job = {id:string;orderId:string;leaseId:string;status:string;command:string[];imageDigest:string;maxRuntimeSeconds:number;createdAt:string;startedAt:string|null;endedAt:string|null;outputArtifactIds:string[]};
+export type Earnings = {settledMinor:number;pendingOrders:number;completedOrders:number;entries:Array<Settlement & {model:string}>};
+export type Audit = {id:string;action:string;actorId:string;resourceId:string;occurredAt:string};
+export type Items<T> = {items:T[]};

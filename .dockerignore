@@ -5,3 +5,7 @@ coverage
 .git
 .gitignore
 *.log
+data
+test-results
+playwright-report
+artifacts

@@ -1,0 +1,56 @@
+import {test,expect,type Page} from "@playwright/test";
+async function login(page:Page,role:"买家"|"卖家"|"运营"){
+ await page.goto("/login");await page.getByRole("button",{name:`${role}账号`,exact:true}).click();await page.getByRole("button",{name:"登录",exact:true}).click();
+ await expect(page).toHaveURL(new RegExp(role==="卖家"?"/seller/overview":role==="运营"?"/operator/listings":"/buyer/market"));
+}
+test("买家市场、下单、支付、任务与结束结算闭环",async({page})=>{
+ const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
+ await login(page,"买家");
+ await expect(page.getByRole("navigation")).toContainText("算力市场");await expect(page.getByRole("navigation")).not.toContainText("设备节点");
+ await expect(page.locator(".product-card")).toHaveCount(6);
+ await page.screenshot({path:"artifacts/buyer-market-desktop.png",fullPage:true});
+ await page.getByRole("textbox",{name:"搜索 GPU 型号"}).fill("5090");await expect(page.locator(".product-card")).toHaveCount(1);
+ await page.getByRole("link",{name:"立即租用"}).click();await expect(page.getByRole("heading",{name:"确认租用",exact:true})).toBeVisible();
+ await page.getByRole("checkbox",{name:"我已了解租用规则与设备访问边界"}).check();await page.getByRole("button",{name:"创建订单",exact:true}).click();
+ await expect(page).toHaveURL(/\/buyer\/orders\//);const orderPath=new URL(page.url()).pathname;
+ await page.getByRole("button",{name:"支付并启动租约"}).click();await page.getByRole("dialog").getByRole("button",{name:"确认",exact:true}).click();
+ await expect(page.getByRole("link",{name:"进入任务空间"})).toBeVisible();
+ await page.getByRole("link",{name:"进入任务空间"}).click();
+ await expect(page.locator(".workspace-layout .loading")).toHaveCount(0);const previousJobs=await page.locator(".job-item").count();
+ await page.getByRole("textbox",{name:"Python 任务代码"}).fill("print('role-isolated workload')");
+ await page.getByRole("button",{name:"提交任务",exact:true}).click();await expect(page.locator(".job-item")).toHaveCount(previousJobs+1);
+ await page.screenshot({path:"artifacts/buyer-workspace-desktop.png",fullPage:true});
+ await page.reload();await expect(page.locator(".job-item")).toHaveCount(previousJobs+1);
+ await page.goto(orderPath);await page.getByRole("button",{name:"结束租约",exact:true}).click();await page.getByRole("dialog").getByRole("button",{name:"确认",exact:true}).click();
+ await expect(page.locator(".order-status-banner")).toContainText("已完成");await expect(page.getByText("未用金额释放")).toBeVisible();
+ await page.goto("/buyer/workspace");await page.locator(".job-item").first().click();await expect(page.getByRole("dialog")).toContainText("已取消");await page.getByRole("button",{name:"关闭窗口"}).click();
+ await page.goto("/seller/nodes");await expect(page.getByRole("heading",{name:"无法访问此工作台"})).toBeVisible();
+ await page.goto("/buyer/market");await page.setViewportSize({width:390,height:844});await expect(page.locator(".product-card")).toHaveCount(6);
+ await expect.poll(()=>page.locator(".sidebar").evaluate(el=>el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+ await page.screenshot({path:"artifacts/buyer-market-mobile.png",fullPage:true});
+ await page.getByRole("button",{name:"展开导航菜单"}).click();await page.getByRole("navigation").getByRole("link",{name:"我的订单",exact:true}).click();await expect(page.getByRole("heading",{name:"我的订单",exact:true})).toBeVisible();
+ await expect.poll(()=>page.locator(".sidebar").evaluate(el=>el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+ expect(errors).toEqual([]);
+});
+test("卖家独立菜单、设备管理、商品编辑与运营审核",async({page})=>{
+ await login(page,"卖家");await expect(page.getByRole("navigation")).toContainText("设备节点");await expect(page.getByRole("navigation")).not.toContainText("任务空间");
+ await expect(page.locator(".overview-grid .loading")).toHaveCount(0);
+ await page.screenshot({path:"artifacts/seller-overview-desktop.png",fullPage:true});
+ await page.getByRole("link",{name:"设备节点",exact:true}).click();await expect(page.locator(".node-card")).toHaveCount(3);
+ const node=page.locator(".node-card").first();await node.getByRole("button",{name:"暂停接单"}).click();await expect(node).toContainText("暂停接单");await node.getByRole("button",{name:"恢复接单"}).click();await expect(node).toContainText("在线");
+ await page.getByRole("link",{name:"商品管理",exact:true}).click();
+ const row=page.getByRole("row").filter({hasText:"RTX 5090"});await row.getByRole("button",{name:"编辑",exact:true}).click();
+ await page.getByRole("spinbutton",{name:"租用单价",exact:true}).fill("3.18");await page.getByRole("button",{name:"提交审核",exact:true}).click();await expect(row).toContainText("待审核");
+ await page.screenshot({path:"artifacts/seller-listings-desktop.png",fullPage:true});
+ await page.getByRole("button",{name:"退出登录",exact:true}).click();await login(page,"运营");
+ const reviewed=page.getByRole("row").filter({hasText:"RTX 5090"});await reviewed.getByRole("button",{name:"审核并上架",exact:true}).click();await expect(reviewed).toContainText("已上架");
+ await page.getByRole("button",{name:"退出登录",exact:true}).click();await login(page,"卖家");
+ await page.getByRole("link",{name:"租出订单",exact:true}).click();await page.getByRole("link",{name:"查看详情"}).first().click();
+ await expect(page.getByRole("link",{name:"进入任务空间"})).toHaveCount(0);await expect(page.getByRole("button",{name:"结束租约",exact:true})).toHaveCount(0);
+ await page.getByRole("link",{name:"收益结算",exact:true}).click();await expect(page.getByRole("heading",{name:"收益结算",exact:true})).toBeVisible();
+ await expect(page.locator(".toast.error")).toHaveCount(0);
+ await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await expect.poll(()=>page.locator(".sidebar").evaluate(el=>el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+ await page.screenshot({path:"artifacts/seller-earnings-mobile.png",fullPage:true});
+});

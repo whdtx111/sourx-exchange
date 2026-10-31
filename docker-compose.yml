@@ -9,13 +9,16 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       DEMO_MODE: "true"
-      ALLOW_DEV_AUTH_BYPASS: "true"
+      ALLOW_DEV_AUTH_BYPASS: "false"
+      DATA_FILE: /app/data/state.json
       AUTH_SECRET: "local-demo-auth-secret-change-me-32-chars"
       CAPABILITY_SECRET: "local-demo-capability-secret-change-me-32"
       AGENT_COMMAND_SECRET: "local-demo-agent-command-secret-change-me"
       PAYMENT_WEBHOOK_SECRET: "local-demo-payment-webhook-secret-change"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - sourx-data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => { if (!r.ok) process.exit(1) })"]
       interval: 5s
@@ -23,3 +26,6 @@ services:
       retries: 12
       start_period: 5s
     restart: unless-stopped
+
+volumes:
+  sourx-data:

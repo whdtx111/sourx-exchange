@@ -5,14 +5,17 @@
   "description": "SourX Exchange compute marketplace control plane",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && vite build",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.frontend.json && vite build",
     "build:server": "tsc -p tsconfig.json",
     "build:web": "vite build",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "dev:web": "vite --host 127.0.0.1",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.frontend.json",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "fastify": "^5.2.1",
@@ -20,6 +23,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.10.7",
     "@types/react": "19.1.16",
     "@types/react-dom": "19.1.9",
@@ -33,5 +37,6 @@
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "packageManager": "pnpm@11.8.0"
 }
