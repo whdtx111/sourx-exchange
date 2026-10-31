@@ -24,6 +24,12 @@ export interface AgentNodeInput {
 export class AgentRegistry {
   private readonly credentials = new Map<string, AgentCredential>();
 
+  public snapshot() { return {credentials: [...this.credentials.entries()]}; }
+  public restore(data: ReturnType<AgentRegistry["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.credentials) this.credentials.set(key,value);
+  }
+
   public constructor(
     private readonly marketplace: MarketplaceService,
     private readonly enrollments: EnrollmentCodeStore,

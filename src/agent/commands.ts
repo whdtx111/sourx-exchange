@@ -20,6 +20,14 @@ export class AgentCommandQueue {
   private readonly pendingByNode = new Map<string, string[]>();
   private readonly acks = new Map<string, CommandAck>();
 
+  public snapshot() { return {commands: [...this.commands.entries()], pendingByNode: [...this.pendingByNode.entries()], acks: [...this.acks.entries()]}; }
+  public restore(data: ReturnType<AgentCommandQueue["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.commands) this.commands.set(key,value);
+    for (const [key,value] of data.pendingByNode) this.pendingByNode.set(key,value);
+    for (const [key,value] of data.acks) this.acks.set(key,value);
+  }
+
   public constructor(private readonly signer: AgentCommandSigner, private readonly clock: () => number = () => Date.now()) {}
 
   public enqueue(nodeId: string, type: AgentCommandType, payload: AgentCommandPayload, ttlSeconds = 60): SignedAgentCommand {

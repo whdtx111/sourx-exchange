@@ -4,7 +4,7 @@ import { createStore } from "./domain/store.js";
 
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? "127.0.0.1";
-const app = createApp(new MarketplaceService(createStore()));
+const app = createApp(new MarketplaceService(createStore()), process.env.DATA_FILE ? {dataFile:process.env.DATA_FILE} : {});
 
 try {
   await app.listen({ port, host });

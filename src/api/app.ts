@@ -19,7 +19,11 @@ import { AgentCommandSigner } from "../agent/security.js";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { demoImageDigest, initializeDemo, type DemoState } from "../demo.js";
+import { demoImageDigest, initializeDemo } from "../demo.js";
+
+import { PortalViews } from "../platform/views.js";
+import { registerPortalRoutes } from "../platform/routes.js";
+import { LocalPersistence, restoreDomain, snapshotDomain } from "../platform/persistence.js";
 
 const userRoleSchema = z.object({ role: z.enum(["buyer", "provider", "operator"]) });
 const nodeSchema = z.object({
@@ -43,7 +47,7 @@ const listingSchema = z.object({
 });
 const orderSchema = z.object({
   listingId: z.string().min(1),
-  durationMinutes: z.number().int().positive(),
+  durationMinutes: z.number().int().min(1).max(10080),
 });
 const paymentSchema = z.object({ providerReference: z.string().min(1).max(128) });
 const readySchema = z.object({ sandboxId: z.string().min(1).max(128) });
@@ -105,7 +109,7 @@ const requireActor = (request: FastifyRequest, reply: FastifyReply, auth: AuthSe
     throw error;
   }
   if (!id) {
-    void reply.code(401).send({ error: { code: "UNAUTHENTICATED", message: "缺少 x-user-id" } });
+    void reply.code(401).send({ error: { code: "UNAUTHENTICATED", message: "请先登录" } });
     return null;
   }
   return id;
@@ -113,7 +117,9 @@ const requireActor = (request: FastifyRequest, reply: FastifyReply, auth: AuthSe
 
 const parse = <T>(schema: z.ZodType<T>, value: unknown): T => schema.parse(value);
 
-export const createApp = (service: MarketplaceService): FastifyInstance => {
+export const createApp = (service: MarketplaceService, options: {dataFile?: string} = {}): FastifyInstance => {
+  const persistence = options.dataFile ? new LocalPersistence(options.dataFile) : null;
+  restoreDomain(service.store, persistence?.read("domain"));
   const app = Fastify({ logger: false });
   const auth = new AuthService(service, process.env.AUTH_SECRET ?? "development-auth-secret-that-is-longer-than-32");
   const actor = (request: FastifyRequest, reply: FastifyReply): string | null => requireActor(request, reply, auth);
@@ -129,36 +135,71 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
   const enrollmentCodes = new EnrollmentCodeStore();
   const agentRegistry = new AgentRegistry(service, enrollmentCodes);
   const agentCommands = new AgentCommandQueue(new AgentCommandSigner(process.env.AGENT_COMMAND_SECRET ?? "development-agent-command-secret-longer-than-32"));
-  const demo = demoMode ? initializeDemo(service, metering) : null;
-  if (demo) {
-    cleanupRuntime.create({
-      sandboxId: demo.lease.sandboxId!,
-      leaseId: demo.lease.id,
-      gpuUuid: demo.node.gpus[0]!.uuid,
-      imageDigest: demoImageDigest,
-      command: ["python"],
-      workspaceQuotaMb: 1024,
-      environment: {},
-      networkMode: "isolated",
-      hostPid: false,
-      hostIpc: false,
-      hostNetwork: false,
-      readOnlyRootFilesystem: true,
-      privileged: false,
-      hostMounts: [],
-      dropCapabilities: ["ALL"],
-      pidsLimit: 128,
-      memoryLimitMb: 4096,
-      cpuLimitMilli: 2000,
-      containerUser: "1000:1000",
-      allowlistedEgress: [],
+  agentRegistry.restore(persistence?.read("agents"));
+  enrollmentCodes.restore(persistence?.read("enrollments"));
+  agentCommands.restore(persistence?.read("commands"));
+  paymentWebhooks.restore(persistence?.read("webhooks"));
+  auth.restore(persistence?.read("auth"));
+  workload.restore(persistence?.read("workload"));
+  artifacts.restore(persistence?.read("artifacts"));
+  metering.restore(persistence?.read("metering"));
+  settlement.restore(persistence?.read("settlement"));
+  cleanupRuntime.restore(persistence?.read("runtime"));
+  if (demoMode) initializeDemo(service, metering, auth, settlement);
+  const prepareRuntime = (leaseId: string) => {
+    const lease = service.getLease(leaseId);
+    const node = service.store.nodes.get(lease.nodeId)!;
+    const sandboxId = lease.sandboxId ?? `sandbox_${lease.id}`;
+    if (!cleanupRuntime.get(sandboxId)) cleanupRuntime.create({
+      sandboxId, leaseId: lease.id, gpuUuid: node.gpus.find((g) => g.id === lease.gpuId)!.uuid,
+      imageDigest: demoImageDigest, command: ["python"], workspaceQuotaMb: 1024, environment: {},
+      networkMode: "isolated", hostPid: false, hostIpc: false, hostNetwork: false,
+      readOnlyRootFilesystem: true, privileged: false, hostMounts: [], dropCapabilities: ["ALL"],
+      pidsLimit: 128, memoryLimitMb: 4096, cpuLimitMilli: 2000, containerUser: "1000:1000", allowlistedEgress: [],
     });
+    return sandboxId;
+  };
+  if (demoMode) for (const lease of service.store.leases.values()) {
+    if (["ready", "running"].includes(lease.status)) prepareRuntime(lease.id);
+  }
+  const views = new PortalViews(service, metering, settlement);
+  const persist = () => persistence?.save({agents:agentRegistry.snapshot(),enrollments:enrollmentCodes.snapshot(),commands:agentCommands.snapshot(),webhooks:paymentWebhooks.snapshot(),domain:snapshotDomain(service.store),auth:auth.snapshot(),workload:workload.snapshot(),artifacts:artifacts.snapshot(),metering:metering.snapshot(),settlement:settlement.snapshot(),runtime:cleanupRuntime.snapshot()});
+  persist();
+  app.addHook("onSend", async (request,_reply,payload) => { if (!["GET","HEAD"].includes(request.method)) persist(); return payload; });
+  app.addHook("onClose", async () => { persist(); });
+  registerPortalRoutes(app, {service,auth,views,workload,settlement,actor,localMode:demoMode,
+    startLocalLease: (orderId) => {
+      let lease = service.findLeaseForOrder(orderId);
+      if (!lease) lease = service.allocateLease(orderId);
+      if (["requested","starting"].includes(lease.status)) service.markLeaseReady(lease.id,prepareRuntime(lease.id));
+    },
+  });
+  if (demoMode) {
+    const localWorker = setInterval(() => {
+      for (const lease of service.store.leases.values()) {
+        if (!["ready","running"].includes(lease.status)) continue;
+        const order = service.store.orders.get(lease.orderId)!;
+        if (order.status !== "active") continue;
+        if (lease.startedAt && Date.now() >= Date.parse(lease.startedAt) + order.durationMinutes * 60000) {
+          cleanup.endOrder(order.id);
+          settlement.settle(order.id);
+          continue;
+        }
+        const node = service.store.nodes.get(lease.nodeId)!;
+        if (node.agentVersion !== "1.0.0-local") continue;
+        node.lastHeartbeatAt = new Date().toISOString();
+        metering.record({leaseId:lease.id,observedAtEpoch:Math.floor(Date.now()/1000),heartbeat:true,sandboxState:"running",gpuUuid:node.gpus.find((g) => g.id === lease.gpuId)!.uuid});
+      }
+      persist();
+    }, 30000);
+    localWorker.unref();
+    app.addHook("onClose", async () => {clearInterval(localWorker);});
   }
   const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
-  const webRoot = join(projectRoot, "web");
   const webDist = join(projectRoot, "web-dist");
   const sendWebFile = async (file: string, reply: FastifyReply, contentType: string) => {
-    return reply.type(contentType).send(await readFile(file));
+    const content = await readFile(file);
+    return reply.type(contentType).send(content);
   };
 
   app.setErrorHandler((error, _request, reply) => {
@@ -177,42 +218,31 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
       });
       return;
     }
+    if (error instanceof Error && "statusCode" in error && typeof error.statusCode === "number" && error.statusCode >= 400 && error.statusCode < 500) {
+      return void reply.code(error.statusCode).send({error:{code:"INVALID_REQUEST",message:error.message}});
+    }
     console.error("[sourx] unhandled request error", error);
     void reply.code(500).send({ error: { code: "INTERNAL_ERROR", message: "服务内部错误" } });
   });
 
   app.get("/health", async () => ({ status: "ok", service: "sourx-exchange" }));
 
-  app.get("/", async (_request, reply) => {
-    try {
-      return await sendWebFile(join(webDist, "index.html"), reply, "text/html; charset=utf-8");
-    } catch {
-      return reply.type("text/html; charset=utf-8").send(await readFile(join(webRoot, "index.html"), "utf8"));
-    }
-  });
+  const serveApp = async (_request: FastifyRequest, reply: FastifyReply) => {
+    reply.header("Cache-Control","no-cache");
+    try { return await sendWebFile(join(webDist,"index.html"),reply,"text/html; charset=utf-8"); }
+    catch { return reply.code(503).send({error:{code:"FRONTEND_NOT_BUILT",message:"请先执行 pnpm build 或启动前端开发服务"}}); }
+  };
+  app.get("/", serveApp);
+  app.get("/login", serveApp);
+  app.get("/buyer/*", serveApp);
+  app.get("/seller/*", serveApp);
+  app.get("/operator/*", serveApp);
   app.get("/assets/*", async (request, reply) => {
-    const asset = (request.params as { "*": string })["*"];
-    if (!asset || asset.includes("..") || asset.includes("\\")) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "静态资源不存在" } });
-    const contentType = asset.endsWith(".css") ? "text/css; charset=utf-8" : asset.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream";
-    return sendWebFile(join(webDist, "assets", asset), reply, contentType);
-  });
-  app.get("/app.js", async (_request, reply) => reply.type("text/javascript; charset=utf-8").send(await readFile(join(webRoot, "app.js"), "utf8")));
-  app.get("/styles.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(await readFile(join(webRoot, "styles.css"), "utf8")));
-  app.get("/v1/demo/overview", async (request, reply) => {
-    if (!demo) return reply.code(404).send({ error: { code: "DEMO_DISABLED", message: "演示模式未启用" } });
-    const overview = demo as DemoState;
-    const meteringForOrder = metering.listForOrder(overview.order.id);
-    return reply.send({
-      users: overview.users,
-      node: overview.node,
-      listing: overview.listing,
-      order: overview.order,
-      payment: overview.payment,
-      lease: overview.lease,
-      metering: { billableSeconds: metering.billableSeconds(overview.order.id), buckets: meteringForOrder },
-      security: { capabilityScopes: ["job:create", "job:read", "job:cancel", "artifact:read", "artifact:write"], hostMounts: false, hostNetwork: false, rootFilesystemReadOnly: true, orderScoped: true },
-      requestedBy: request.headers["x-user-id"] ?? null,
-    });
+    const asset = (request.params as {"*":string})["*"];
+    if (!asset || asset.includes("..") || asset.includes("\\")) return reply.code(404).send();
+    const type = asset.endsWith(".css") ? "text/css; charset=utf-8" : asset.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream";
+    try { reply.header("Cache-Control","public, max-age=31536000, immutable"); return await sendWebFile(join(webDist,"assets",asset),reply,type); }
+    catch { return reply.header("Cache-Control","no-cache").type("application/json").code(404).send({error:{code:"NOT_FOUND",message:"静态资源不存在"}}); }
   });
 
   // 仅用于开发/测试环境的用户 bootstrap；正式环境应由身份服务替代。
@@ -366,7 +396,10 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     if (!["ready", "running"].includes(lease.status)) {
       throw new DomainError("LEASE_NOT_READY", "租约当前不能签发 capability token");
     }
-    const expiresAt = Math.floor(Date.now() / 1000) + order.durationMinutes * 60;
+    if (order.status !== "active") throw new DomainError("LEASE_NOT_READY", "订单当前不能提交任务");
+    const leaseEnd = Math.floor(Date.parse(lease.startedAt!) / 1000) + order.durationMinutes * 60;
+    const expiresAt = Math.min(Math.floor(Date.now() / 1000) + 900, leaseEnd);
+    if (expiresAt <= Math.floor(Date.now() / 1000)) throw new DomainError("LEASE_EXPIRED", "租约已到期");
     const token = capabilityTokens.issue({
       subject: actorId,
       orderId: order.id,
@@ -388,8 +421,10 @@ export const createApp = (service: MarketplaceService): FastifyInstance => {
     const actorId = actor(request, reply);
     if (!actorId) return;
     const order = service.getOrderForBuyer(actorId, routeId(request));
+    if (order.status === "completed") return reply.send({...order, settlement:settlement.getForOrder(order.id)});
     const result = cleanup.endOrder(order.id);
-    return reply.send({ ...result.order, cleanup: result.report });
+    const settled = demoMode ? settlement.settle(order.id) : null;
+    return reply.send({ ...result.order, cleanup: result.report, settlement:settled });
   });
 
   app.get("/v1/orders/:id/metering", async (request: IdRequest, reply) => {

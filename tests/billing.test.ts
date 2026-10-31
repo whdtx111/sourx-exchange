@@ -58,6 +58,15 @@ describe("artifact、计量和结算", () => {
     expect(metering.billableSeconds(lease.orderId)).toBe(60);
   });
 
+  it("整小时结算保持买家费用、平台费与卖家应收守恒", () => {
+    const {store,service,order,lease}=fixture();
+    const metering=new MeteringService(store,30);
+    for(let i=0;i<120;i++) metering.record({leaseId:lease.id,observedAtEpoch:2000+i*30,heartbeat:true,sandboxState:"running",gpuUuid:"GPU-1"});
+    service.endOrder(order.id);
+    const result=new SettlementService(store,metering).settle(order.id);
+    expect(result).toMatchObject({computeAmountMinor:278,platformFeeMinor:13,providerPayoutMinor:278,chargedAmountMinor:291,releasedAmountMinor:0});
+  });
+
   it("结算金额可以由计量重建，重复结算幂等，争议订单冻结", () => {
     const { store, service, order, lease, payment } = fixture();
     const metering = new MeteringService(store, 30);
@@ -68,10 +77,12 @@ describe("artifact、计量和结算", () => {
     const result = settlement.settle(order.id);
     expect(result.billableSeconds).toBe(60);
     expect(result.computeAmountMinor).toBe(5);
-    expect(result.providerPayoutMinor + result.platformFeeMinor).toBe(result.computeAmountMinor);
+    expect(result.providerPayoutMinor).toBe(result.computeAmountMinor);
+    expect(result.chargedAmountMinor).toBe(result.providerPayoutMinor + result.platformFeeMinor);
+    expect(result.chargedAmountMinor + result.releasedAmountMinor).toBe(order.totalAmountMinor);
     expect(payment.status).toBe("settled");
     expect(settlement.settle(order.id).id).toBe(result.id);
-    expect(settlement.getLedger()).toHaveLength(3);
+    expect(settlement.getLedger()).toHaveLength(4);
 
     const secondOrder = service.createOrder(service.createUser("buyer").id, service.store.listings.values().next().value.id, 30);
     service.authorizePayment(secondOrder.payment.id, "pay-dispute");

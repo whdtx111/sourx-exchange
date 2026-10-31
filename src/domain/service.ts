@@ -77,7 +77,7 @@ export class MarketplaceService {
     if (node.status === "quarantined") {
       throw new DomainError("NODE_QUARANTINED", "节点已隔离，不能恢复心跳");
     }
-    node.status = "online";
+    if (node.status !== "draining") node.status = "online";
     node.lastHeartbeatAt = at;
     return node;
   }
@@ -124,6 +124,54 @@ export class MarketplaceService {
     listing.status = "published";
     this.audit(operatorId, "listing.publish", "listing", listingId, {});
     return listing;
+  }
+
+  public updateListing(providerId: string, listingId: string, input: {pricePerHourMinor: number; minimumMinutes: number}): Listing {
+    const listing = this.ownedListing(providerId, listingId);
+    if (listing.status === "retired") throw new DomainError("INVALID_LISTING_STATE", "已退役商品不能编辑");
+    listing.pricePerHourMinor = input.pricePerHourMinor;
+    listing.minimumMinutes = input.minimumMinutes;
+    listing.version += 1;
+    listing.status = "pending_review";
+    this.audit(providerId, "listing.update", "listing", listingId, {version:listing.version});
+    return listing;
+  }
+
+  public setListingStatus(providerId: string, listingId: string, status: "published" | "paused"): Listing {
+    const listing = this.ownedListing(providerId,listingId);
+    if (listing.status !== (status === "paused" ? "published" : "paused")) throw new DomainError("INVALID_LISTING_STATE", "商品必须先通过审核才能切换上下架状态");
+    if (status === "published" && this.store.nodes.get(listing.nodeId)?.status !== "online") throw new DomainError("NODE_UNAVAILABLE", "请先恢复节点在线");
+    listing.status = status;
+    this.audit(providerId, `listing.${status}`, "listing", listingId, {});
+    return listing;
+  }
+
+  private ownedListing(providerId: string, listingId: string): Listing {
+    this.requireUser(providerId, "provider");
+    const listing = this.store.listings.get(listingId);
+    if (!listing) throw notFound("算力商品");
+    if (listing.providerId !== providerId) throw forbidden("不能管理其他卖家的商品");
+    return listing;
+  }
+
+  public setNodeStatus(providerId: string, nodeId: string, status: "online" | "draining"): ComputeNode {
+    const node = this.getNodeForProvider(providerId,nodeId);
+    if (node.status === "quarantined") throw forbidden("已隔离节点必须由运营方处理");
+    node.status = status;
+    this.audit(providerId, `node.${status}`, "node", nodeId, {});
+    return node;
+  }
+
+  public cancelOrder(buyerId: string, orderId: string): Order {
+    const order = this.getOrderForBuyer(buyerId, orderId);
+    if (order.status === "cancelled") return order;
+    if (order.status !== "payment_pending") throw new DomainError("INVALID_ORDER_STATE", "只能取消待支付订单");
+    order.status = "cancelled";
+    const payment = [...this.store.payments.values()].find((p) => p.orderId === orderId);
+    if (payment) payment.status = "voided";
+    this.releaseReservation(orderId);
+    this.audit(buyerId,"order.cancel","order",orderId,{});
+    return order;
   }
 
   public createOrder(buyerId: string, listingId: string, durationMinutes: number): { order: Order; payment: Payment } {

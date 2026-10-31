@@ -34,6 +34,12 @@ const sha256Pattern = /^[a-f0-9]{64}$/;
 export class ArtifactService {
   private readonly artifacts = new Map<string, Artifact>();
 
+  public snapshot() { return {artifacts: [...this.artifacts.entries()]}; }
+  public restore(data: ReturnType<ArtifactService["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.artifacts) this.artifacts.set(key,value);
+  }
+
   public constructor(
     private readonly store: DomainStore,
     private readonly tokens: CapabilityTokenService,

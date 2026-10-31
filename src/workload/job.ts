@@ -35,6 +35,12 @@ const allowedStatuses = new Set(["ready", "running"]);
 export class WorkloadService {
   private readonly jobs = new Map<string, Job>();
 
+  public snapshot() { return {jobs: [...this.jobs.entries()]}; }
+  public restore(data: ReturnType<WorkloadService["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.jobs) this.jobs.set(key,value);
+  }
+
   public constructor(
     private readonly store: DomainStore,
     private readonly tokens: CapabilityTokenService,
@@ -42,6 +48,10 @@ export class WorkloadService {
     private readonly clock: () => number = () => Date.now(),
     private readonly artifacts: ArtifactService | undefined = undefined,
   ) {}
+
+  public listForOwner(ownerId: string): Job[] {
+    return [...this.jobs.values()].filter((job) => job.ownerId === ownerId).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
+  }
 
   public submit(token: string, input: SubmitJobInput): Job {
     const claims = this.tokens.verify(token, { requiredScope: "job:create", orderId: input.orderId, leaseId: input.leaseId });
@@ -52,6 +62,8 @@ export class WorkloadService {
     if (!listing) throw notFound("算力商品");
     if (order.buyerId !== claims.subject) throw forbidden("token 所属用户不是订单买家");
     if (lease.orderId !== order.id || lease.tokenVersion !== claims.version) throw new DomainError("TOKEN_REVOKED", "租约 token 已撤销");
+    if (order.status !== "active") throw new DomainError("LEASE_NOT_READY", "订单不可提交任务");
+    if (lease.startedAt && this.clock() >= Date.parse(lease.startedAt) + order.durationMinutes * 60000) throw new DomainError("LEASE_EXPIRED", "租约已到期");
     if (!allowedStatuses.has(lease.status)) throw new DomainError("LEASE_NOT_READY", "租约当前不能提交任务");
     this.validateInput(input, listing.imageDigests);
     for (const artifactId of input.inputArtifactIds) {

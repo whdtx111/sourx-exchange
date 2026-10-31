@@ -18,6 +18,12 @@ const signatureFor = (secret: string, event: PaymentWebhookEvent): string =>
 export class PaymentWebhookProcessor {
   private readonly processed = new Map<string, { fingerprint: string; payment: Payment }>();
 
+  public snapshot() { return {processed: [...this.processed.entries()]}; }
+  public restore(data: ReturnType<PaymentWebhookProcessor["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.processed) this.processed.set(key,value);
+  }
+
   public constructor(private readonly marketplace: MarketplaceService, private readonly secret: string) {
     if (secret.length < 32) throw new Error("支付 webhook secret 至少需要 32 个字符");
   }

@@ -10,6 +10,12 @@ interface EnrollmentRecord {
 export class EnrollmentCodeStore {
   private readonly records = new Map<string, EnrollmentRecord>();
 
+  public snapshot() { return {records: [...this.records.entries()]}; }
+  public restore(data: ReturnType<EnrollmentCodeStore["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.records) this.records.set(key,value);
+  }
+
   public constructor(private readonly clock: () => number = () => Date.now()) {}
 
   public issue(providerId: string, ttlMs = 10 * 60_000): string {

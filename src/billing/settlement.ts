@@ -18,6 +18,8 @@ export interface Settlement {
   computeAmountMinor: number;
   platformFeeMinor: number;
   providerPayoutMinor: number;
+  chargedAmountMinor: number;
+  releasedAmountMinor: number;
   status: "settled" | "frozen" | "refunded";
   createdAt: string;
 }
@@ -25,6 +27,13 @@ export interface Settlement {
 export class SettlementService {
   private readonly settlements = new Map<string, Settlement>();
   private readonly ledger: LedgerEntry[] = [];
+
+  public snapshot() { return {settlements: [...this.settlements.entries()], ledger: this.ledger}; }
+  public restore(data: ReturnType<SettlementService["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.settlements) this.settlements.set(key,value);
+    this.ledger.push(...data.ledger);
+  }
 
   public constructor(private readonly store: DomainStore, private readonly metering: MeteringService, private readonly clock: () => number = () => Date.now()) {}
 
@@ -56,7 +65,9 @@ export class SettlementService {
     const billableSeconds = this.metering.billableSeconds(orderId);
     const computeAmountMinor = Math.min(order.computeAmountMinor, Math.ceil((order.pricePerHourMinor * billableSeconds) / 3600));
     const platformFeeMinor = Math.floor((computeAmountMinor * 500) / 10_000);
-    const providerPayoutMinor = computeAmountMinor - platformFeeMinor;
+    const providerPayoutMinor = computeAmountMinor;
+    const chargedAmountMinor = computeAmountMinor + platformFeeMinor;
+    const releasedAmountMinor = order.totalAmountMinor - chargedAmountMinor;
     const settlement: Settlement = {
       id: `stl_${orderId}`,
       orderId,
@@ -64,6 +75,8 @@ export class SettlementService {
       computeAmountMinor,
       platformFeeMinor,
       providerPayoutMinor,
+      chargedAmountMinor,
+      releasedAmountMinor,
       status: "settled",
       createdAt: new Date(this.clock()).toISOString(),
     };
@@ -74,6 +87,7 @@ export class SettlementService {
       { id: `led_${orderId}_fee`, orderId, type: "platform_fee", amountMinor: platformFeeMinor, createdAt: settlement.createdAt, metadata: {} },
       { id: `led_${orderId}_payout`, orderId, type: "provider_payout", amountMinor: providerPayoutMinor, createdAt: settlement.createdAt, metadata: {} },
     );
+    if (releasedAmountMinor > 0) this.ledger.push({ id:`led_${orderId}_release`,orderId,type:"refund",amountMinor:releasedAmountMinor,createdAt:settlement.createdAt,metadata:{reason:"unused_authorization_release"} });
     return settlement;
   }
 
@@ -86,7 +100,7 @@ export class SettlementService {
       const payment = [...this.store.payments.values()].find((candidate) => candidate.orderId === orderId);
       if (payment) payment.status = "partially_refunded";
       order.status = "refunded";
-      const created: Settlement = { id: `stl_${orderId}`, orderId, billableSeconds: 0, computeAmountMinor: 0, platformFeeMinor: 0, providerPayoutMinor: 0, status: "refunded", createdAt: new Date(this.clock()).toISOString() };
+      const created: Settlement = { id: `stl_${orderId}`, orderId, billableSeconds: 0, computeAmountMinor: 0, platformFeeMinor: 0, providerPayoutMinor: 0, chargedAmountMinor: 0, releasedAmountMinor: order.totalAmountMinor, status: "refunded", createdAt: new Date(this.clock()).toISOString() };
       this.settlements.set(orderId, created);
       this.ledger.push({ id: `led_${orderId}_refund`, orderId, type: "refund", amountMinor: order.totalAmountMinor, createdAt: created.createdAt, metadata: {} });
       return created;
@@ -96,6 +110,8 @@ export class SettlementService {
     this.ledger.push({ id: `led_${orderId}_refund`, orderId, type: "refund", amountMinor: settlement.computeAmountMinor, createdAt: new Date(this.clock()).toISOString(), metadata: {} });
     return settlement;
   }
+
+  public getForOrder(orderId: string): Settlement | null { return this.settlements.get(orderId) ?? null; }
 
   public getLedger(): readonly LedgerEntry[] {
     return this.ledger;

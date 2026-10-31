@@ -15,6 +15,12 @@ export interface MeterBucket {
 export class MeteringService {
   private readonly buckets = new Map<string, MeterBucket>();
 
+  public snapshot() { return {buckets: [...this.buckets.entries()]}; }
+  public restore(data: ReturnType<MeteringService["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.buckets) this.buckets.set(key,value);
+  }
+
   public constructor(private readonly store: DomainStore, private readonly intervalSeconds = 30, private readonly clock: () => number = () => Date.now()) {
     if (intervalSeconds <= 0 || !Number.isInteger(intervalSeconds)) throw new Error("计量周期必须为正整数");
   }

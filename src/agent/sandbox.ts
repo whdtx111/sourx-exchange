@@ -71,6 +71,12 @@ export interface SandboxRuntime {
 export class InMemorySandboxRuntime implements SandboxRuntime {
   private readonly records = new Map<string, SandboxRecord>();
 
+  public snapshot() { return {records: [...this.records.entries()]}; }
+  public restore(data: ReturnType<InMemorySandboxRuntime["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.records) this.records.set(key,value);
+  }
+
   public constructor(private readonly allowedImages: readonly string[]) {}
 
   public create(spec: SandboxSpec): SandboxRecord {

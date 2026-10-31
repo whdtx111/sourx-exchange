@@ -57,6 +57,23 @@ export class AuthService {
     return user;
   }
 
+  public attachAccount(identifier: string, password: string, userId: string): void {
+    this.marketplace.requireUser(userId);
+    this.validatePassword(password);
+    this.accounts.set(this.normalizeIdentifier(identifier), {userId, passwordHash: this.hashPassword(password)});
+  }
+
+  public identifierFor(userId: string): string {
+    return [...this.accounts.entries()].find(([,a]) => a.userId === userId)?.[0] ?? "";
+  }
+
+  public snapshot() { return {accounts:[...this.accounts.entries()], sessions:[...this.sessions.entries()]}; }
+  public restore(data: ReturnType<AuthService["snapshot"]> | undefined) {
+    if (!data) return;
+    for (const [key,value] of data.accounts) this.accounts.set(key,value);
+    for (const [key,value] of data.sessions) this.sessions.set(key,value);
+  }
+
   public login(identifier: string, password: string): AuthTokens {
     const account = this.accounts.get(this.normalizeIdentifier(identifier));
     if (!account || !this.verifyPassword(password, account.passwordHash)) throw new DomainError("INVALID_CREDENTIALS", "账户或密码错误");
